@@ -1,65 +1,147 @@
-import Image from "next/image";
+"use client";
 
-export default function Home() {
+import { useState } from "react";
+import { useRouter } from "next/navigation";
+
+export default function HomePage() {
+  const router = useRouter();
+  const [email, setEmail] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setErr(null);
+    setLoading(true);
+
+    try {
+      const res = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+
+      const json = await res.json();
+
+      if (!res.ok || !json.ok) {
+        setErr(json?.error ?? "Errore login");
+        return;
+      }
+
+      router.push("/vote");
+    } catch {
+      setErr("Errore di rete");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
+    <main style={{ minHeight: "100vh", background: "#e5ddd5" }}>
+      {/* Top bar */}
+      <div
+        style={{
+          background: "#075e54",
+          color: "white",
+          padding: "14px 16px",
+          fontWeight: 900,
+          fontSize: 18,
+          position: "sticky",
+          top: 0,
+          zIndex: 10,
+          boxShadow: "0 2px 10px rgba(0,0,0,0.12)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+        }}
+      >
+        <span>Accesso</span>
+
+        {/* Logo top-right */}
+        <img
+          src="/logo.png"
+          alt="Logo"
+          style={{
+            width: 50,
+            height: 50,
+            borderRadius: 10,
+            objectFit: "cover",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.18)",
+            border: "1px solid rgba(255,255,255,0.25)",
+          }}
         />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+      </div>
+
+      <div style={{ maxWidth: 520, margin: "0 auto", padding: 16 }}>
+        <div
+          style={{
+            background: "rgba(255,255,255,0.92)",
+            border: "1px solid rgba(0,0,0,0.06)",
+            borderRadius: 16,
+            padding: 16,
+            boxShadow: "0 1px 10px rgba(0,0,0,0.08)",
+          }}
+        >
+          {/* TESTI PIÙ VISIBILI */}
+          <div style={{ fontWeight: 900, marginBottom: 8, color: "#111", fontSize: 18 }}>
+            Inserisci la tua email
+          </div>
+          <div style={{ fontSize: 14, color: "#2b2b2b", lineHeight: 1.35 }}>
+            Se la mail è in lista, entri automaticamente con la squadra associata.
+          </div>
+
+          <form onSubmit={onSubmit} style={{ marginTop: 14, display: "grid", gap: 10 }}>
+            <input
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="email@example.com"
+              inputMode="email"
+              style={{
+                padding: 12,
+                borderRadius: 12,
+                border: "1px solid rgba(0,0,0,0.18)",
+                fontSize: 16,
+                outline: "none",
+                background: "white",
+                color: "#111",
+              }}
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+
+            <button
+              type="submit"
+              disabled={loading}
+              style={{
+                padding: 12,
+                borderRadius: 12,
+                border: "none",
+                background: "#25d366",
+                color: "#062b22",
+                fontSize: 16,
+                fontWeight: 900,
+                cursor: loading ? "not-allowed" : "pointer",
+                opacity: loading ? 0.7 : 1,
+              }}
+            >
+              {loading ? "Accesso..." : "Entra"}
+            </button>
+
+            {err && (
+              <div
+                style={{
+                  padding: 12,
+                  borderRadius: 12,
+                  background: "#fff0f0",
+                  border: "1px solid rgba(200,0,0,0.2)",
+                  color: "#7a1010",
+                  fontWeight: 800,
+                }}
+              >
+                {err}
+              </div>
+            )}
+          </form>
         </div>
-      </main>
-    </div>
+      </div>
+    </main>
   );
 }
