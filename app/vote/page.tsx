@@ -16,26 +16,64 @@ type Me = {
 type Option = {
   id: number;
   name: string;
-  media_url: string | null;
+  media_url: string | null;      // URL del video originale (watch?v=... o youtu.be/...)
+  start_sec: number | null;      // inizio in secondi (es: 42)
+  end_sec: number | null;        // fine in secondi (es: 57)
   team_id: number;
   team_name: string | null;
 };
 
-function getYouTubeEmbed(url: string) {
+function extractYouTubeVideoId(url: string): string | null {
   try {
     const u = new URL(url);
+
+    // youtu.be/VIDEO_ID
     if (u.hostname.includes("youtu.be")) {
-      const id = u.pathname.replace("/", "");
-      return id ? `https://www.youtube.com/embed/${id}` : null;
+      const id = u.pathname.split("/").filter(Boolean)[0];
+      return id || null;
     }
+
     if (u.hostname.includes("youtube.com")) {
-      const id = u.searchParams.get("v");
-      return id ? `https://www.youtube.com/embed/${id}` : null;
+      // watch?v=VIDEO_ID
+      const v = u.searchParams.get("v");
+      if (v) return v;
+
+      // /embed/VIDEO_ID
+      const embedMatch = u.pathname.match(/\/embed\/([^/?]+)/);
+      if (embedMatch?.[1]) return embedMatch[1];
     }
+
     return null;
   } catch {
     return null;
   }
+}
+
+function buildYouTubeEmbed(url: string, startSec?: number | null, endSec?: number | null): string | null {
+  const videoId = extractYouTubeVideoId(url);
+  if (!videoId) return null;
+
+  const params = new URLSearchParams({
+    rel: "0",
+    modestbranding: "1",
+  });
+
+  // start/end sono opzionali, ma se ci sono devono essere validi
+  if (typeof startSec === "number" && Number.isFinite(startSec) && startSec >= 0) {
+    params.set("start", String(Math.floor(startSec)));
+  }
+  if (typeof endSec === "number" && Number.isFinite(endSec) && endSec >= 0) {
+    params.set("end", String(Math.floor(endSec)));
+  }
+
+  // se li hai entrambi, assicura end > start (altrimenti non mettere end)
+  if (params.has("start") && params.has("end")) {
+    const s = Number(params.get("start"));
+    const e = Number(params.get("end"));
+    if (!(e > s)) params.delete("end");
+  }
+
+  return `https://www.youtube.com/embed/${videoId}?${params.toString()}`;
 }
 
 function isDirectVideo(url: string) {
@@ -450,7 +488,7 @@ export default function VotePage() {
           {options.map((o) => {
             const isOwnTeam = !!me && o.team_id === me.team_id;
             const disabled = isLocked || voting || isOwnTeam;
-            const yt = o.media_url ? getYouTubeEmbed(o.media_url) : null;
+            const yt = o.media_url ? buildYouTubeEmbed(o.media_url, o.start_sec, o.end_sec) : null;
 
             return (
               <div

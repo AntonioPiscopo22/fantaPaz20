@@ -10,6 +10,8 @@ type OptionDbRow = {
   name: string;
   team_id: number;
   media_url: string | null;
+  start_sec: number | null;
+  end_sec: number | null;
   team: { name: string } | null;
 };
 
@@ -28,7 +30,7 @@ export async function GET() {
 
   const { data, error } = await supabase
     .from("options")
-    .select("id, name, team_id, media_url, team:teams!options_team_id_fkey(name)")
+    .select("id, name, team_id, media_url, start_sec, end_sec, team:teams!options_team_id_fkey(name)")
     .order("id", { ascending: false });
 
   if (error) {
@@ -38,13 +40,14 @@ export async function GET() {
 
   const options = (data ?? []).map((o) => {
     const row = o as unknown as OptionDbRow;
-    console.log("options sample:", (data ?? [])[0]);
     return {
       id: row.id,
       name: row.name,
       team_id: row.team_id,
       media_url: row.media_url,
-      team_name: row.team?.name ?? null
+      start_sec: row.start_sec,
+      end_sec: row.end_sec,
+      team_name: row.team?.name ?? null,
     };
   });
 
