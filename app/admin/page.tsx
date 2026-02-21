@@ -403,6 +403,9 @@ export default function AdminPage() {
   const [confirmAction, setConfirmAction] = useState<null | (() => Promise<void> | void)>(null);
 
   const totalVotes = useMemo(() => results.reduce((sum, r) => sum + (r.votes ?? 0), 0), [results]);
+  const sortedResults = useMemo(() => {
+    return [...results].sort((a, b) => (b.votes ?? 0) - (a.votes ?? 0));
+  }, [results]);
 
   const teamNameById = useMemo(() => {
     const m = new Map<number, string>();
@@ -803,7 +806,7 @@ export default function AdminPage() {
               defaultOpen={true}
             >
               <div style={{ display: "grid", gap: 10 }}>
-                {results.map((r) => (
+                {sortedResults.map((r) => (
                   <FlexRow
                     key={r.option_id}
                     left={
