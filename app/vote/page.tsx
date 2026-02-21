@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 type Me = {
@@ -16,9 +16,9 @@ type Me = {
 type Option = {
   id: number;
   name: string;
-  media_url: string | null;      // URL del video originale (watch?v=... o youtu.be/...)
-  start_sec: number | null;      // inizio in secondi (es: 42)
-  end_sec: number | null;        // fine in secondi (es: 57)
+  media_url: string | null; // URL del video originale (watch?v=... o youtu.be/...)
+  start_sec: number | null; // inizio in secondi (es: 42)
+  end_sec: number | null; // fine in secondi (es: 57)
   team_id: number;
   team_name: string | null;
 };
@@ -49,32 +49,157 @@ function extractYouTubeVideoId(url: string): string | null {
   }
 }
 
-function buildYouTubeEmbed(url: string, startSec?: number | null, endSec?: number | null): string | null {
-  const videoId = extractYouTubeVideoId(url);
-  if (!videoId) return null;
+// =====================================================
+// ✅ YouTube player con replay sempre dalla clip
+// (IFrame Player API + seekTo(start) quando finisce)
+// =====================================================
 
-  const params = new URLSearchParams({
-    rel: "0",
-    modestbranding: "1",
+let ytApiPromise: Promise<void> | null = null;
+
+function loadYouTubeIframeAPI(): Promise<void> {
+  if (ytApiPromise) return ytApiPromise;
+
+  ytApiPromise = new Promise((resolve) => {
+    if (typeof window !== "undefined" && (window as any).YT?.Player) {
+      resolve();
+      return;
+    }
+
+    const tag = document.createElement("script");
+    tag.src = "https://www.youtube.com/iframe_api";
+    document.head.appendChild(tag);
+
+    (window as any).onYouTubeIframeAPIReady = () => resolve();
   });
 
-  // start/end sono opzionali, ma se ci sono devono essere validi
-  if (typeof startSec === "number" && Number.isFinite(startSec) && startSec >= 0) {
-    params.set("start", String(Math.floor(startSec)));
-  }
-  if (typeof endSec === "number" && Number.isFinite(endSec) && endSec >= 0) {
-    params.set("end", String(Math.floor(endSec)));
-  }
-
-  // se li hai entrambi, assicura end > start (altrimenti non mettere end)
-  if (params.has("start") && params.has("end")) {
-    const s = Number(params.get("start"));
-    const e = Number(params.get("end"));
-    if (!(e > s)) params.delete("end");
-  }
-
-  return `https://www.youtube.com/embed/${videoId}?${params.toString()}`;
+  return ytApiPromise;
 }
+
+function YouTubeClipPlayer({
+  url,
+  startSec,
+  endSec,
+  height = 240,
+  borderRadius = 14,
+}: {
+  url: string;
+  startSec?: number | null;
+  endSec?: number | null;
+  height?: number;
+  borderRadius?: number;
+}) {
+  const videoId = extractYouTubeVideoId(url);
+  const containerId = useId().replace(/:/g, "_");
+  const playerRef = useRef<any>(null);
+  const intervalRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!videoId) return;
+
+    let mounted = true;
+
+    (async () => {
+      await loadYouTubeIframeAPI();
+      if (!mounted) return;
+
+      // cleanup precedente
+      try {
+        if (playerRef.current?.destroy) playerRef.current.destroy();
+      } catch {}
+
+      const YT = (window as any).YT;
+
+      const s = typeof startSec === "number" && startSec >= 0 ? Math.floor(startSec) : 0;
+      const e = typeof endSec === "number" && endSec >= 0 ? Math.floor(endSec) : null;
+      const hasValidEnd = e !== null && e > s;
+
+      playerRef.current = new YT.Player(containerId, {
+        videoId,
+        width: "100%",
+        height: String(height),
+        playerVars: {
+          rel: 0,
+          modestbranding: 1,
+          playsinline: 1,
+          start: s,
+          ...(hasValidEnd ? { end: e as number } : {}),
+        },
+        events: {
+          onReady: () => {
+            // ✅ appena pronto: posiziona comunque allo start (paranoia sana)
+            try {
+              playerRef.current.seekTo(s, true);
+              playerRef.current.pauseVideo();
+            } catch {}
+          },
+          onStateChange: (ev: any) => {
+            // 0 = ended
+            if (ev?.data === 0) {
+              // ✅ finito: torna allo start così il replay riparte dalla clip
+              try {
+                playerRef.current.seekTo(s, true);
+                playerRef.current.pauseVideo();
+              } catch {}
+            }
+          },
+        },
+      });
+
+      // ✅ rinforzo per l'end (alcune UI/contesti ignorano end): polling del tempo
+      if (hasValidEnd) {
+        if (intervalRef.current) window.clearInterval(intervalRef.current);
+        intervalRef.current = window.setInterval(() => {
+          try {
+            const p = playerRef.current;
+            if (!p?.getCurrentTime) return;
+            const t = p.getCurrentTime();
+            if (t >= (e as number) - 0.15) {
+              p.seekTo(s, true);
+              p.pauseVideo();
+            }
+          } catch {}
+        }, 250);
+      }
+    })();
+
+    return () => {
+      mounted = false;
+      if (intervalRef.current) window.clearInterval(intervalRef.current);
+      intervalRef.current = null;
+      try {
+        playerRef.current?.destroy?.();
+      } catch {}
+      playerRef.current = null;
+    };
+  }, [url, videoId, startSec, endSec, height, containerId]);
+
+  if (!videoId) {
+    // fallback: non è un url “video” valido (es. link clip/...) -> apri
+    return (
+      <a href={url} target="_blank" rel="noreferrer" style={{ color: "#075e54", fontWeight: 900 }}>
+        Apri video/clip
+      </a>
+    );
+  }
+
+  return (
+    <div
+      style={{
+        width: "100%",
+        height,
+        borderRadius,
+        overflow: "hidden",
+        background: "#000",
+      }}
+    >
+      <div id={containerId} />
+    </div>
+  );
+}
+
+// =====================================================
+// altri helper
+// =====================================================
 
 function isDirectVideo(url: string) {
   return /\.(mp4|webm|ogg)(\?.*)?$/i.test(url);
@@ -133,9 +258,7 @@ function ConfirmModal({
         <div style={{ fontSize: 18, fontWeight: 950 }}>{title}</div>
 
         {description && (
-          <div style={{ marginTop: 8, color: "#333", lineHeight: 1.35 }}>
-            {description}
-          </div>
+          <div style={{ marginTop: 8, color: "#333", lineHeight: 1.35 }}>{description}</div>
         )}
 
         <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
@@ -277,16 +400,13 @@ export default function VotePage() {
             {me.first_name || me.last_name ? `${me.first_name ?? ""} ${me.last_name ?? ""}`.trim() : "Utente"}
           </div>
 
-          <div style={{ fontSize: 13, color: "#333", opacity: 0.9, marginTop: 2 }}>
-            {me.email}
-          </div>
+          <div style={{ fontSize: 13, color: "#333", opacity: 0.9, marginTop: 2 }}>{me.email}</div>
 
-          {/* Nascondo “PUÒ VOTARE”, mostro solo se già votato */}
           {}
         </div>
       </div>
     );
-  }, [me]);
+  }, [me, router]);
 
   function openConfirm(option: Option) {
     if (isLocked) return;
@@ -368,9 +488,7 @@ export default function VotePage() {
           />
         </div>
 
-        <div style={{ padding: 16, maxWidth: 720, margin: "0 auto", color: "#111" }}>
-          Caricamento…
-        </div>
+        <div style={{ padding: 16, maxWidth: 720, margin: "0 auto", color: "#111" }}>Caricamento…</div>
       </main>
     );
   }
@@ -402,7 +520,6 @@ export default function VotePage() {
       >
         <span>Votazione</span>
 
-        {/* Logo top-right */}
         <img
           src="/logo.png"
           alt="Logo"
@@ -488,7 +605,6 @@ export default function VotePage() {
           {options.map((o) => {
             const isOwnTeam = !!me && o.team_id === me.team_id;
             const disabled = isLocked || voting || isOwnTeam;
-            const yt = o.media_url ? buildYouTubeEmbed(o.media_url, o.start_sec, o.end_sec) : null;
 
             return (
               <div
@@ -503,7 +619,6 @@ export default function VotePage() {
                   boxShadow: "0 2px 14px rgba(0,0,0,0.10)",
                 }}
               >
-                {/* Titolo con accento giallo/arancio */}
                 <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                   <div
                     style={{
@@ -520,35 +635,30 @@ export default function VotePage() {
                 <div style={{ fontSize: 13, color: "#333", marginTop: 4 }}>
                   <b>{o.team_name ?? `#${o.team_id}`}</b>
                   {me && o.team_id === me.team_id && (
-                    <span style={{ marginLeft: 8, fontWeight: 900, color: "#d97b00" }}>
-                      (la tua squadra)
-                    </span>
+                    <span style={{ marginLeft: 8, fontWeight: 900, color: "#d97b00" }}>(la tua squadra)</span>
                   )}
                 </div>
 
                 {o.media_url && (
                   <div style={{ marginTop: 10 }}>
-                    {yt ? (
-                      <iframe
-                        src={yt}
-                        style={{
-                          width: "100%",
-                          height: 240,
-                          borderRadius: 14,
-                          border: 0,
-                          background: "#000",
-                        }}
-                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                        allowFullScreen
+                    {/* ✅ YouTube: player controllato, replay sempre dalla clip */}
+                    {extractYouTubeVideoId(o.media_url) ? (
+                      <YouTubeClipPlayer
+                        url={o.media_url}
+                        startSec={o.start_sec}
+                        endSec={o.end_sec}
+                        height={240}
+                        borderRadius={14}
                       />
                     ) : isDirectVideo(o.media_url) ? (
-                      <video
-                        src={o.media_url}
-                        controls
-                        style={{ width: "100%", borderRadius: 14 }}
-                      />
+                      <video src={o.media_url} controls style={{ width: "100%", borderRadius: 14 }} />
                     ) : (
-                      <a href={o.media_url} target="_blank" rel="noreferrer" style={{ color: "#075e54", fontWeight: 900 }}>
+                      <a
+                        href={o.media_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ color: "#075e54", fontWeight: 900 }}
+                      >
                         Apri video/clip
                       </a>
                     )}
@@ -564,9 +674,7 @@ export default function VotePage() {
                     padding: 12,
                     borderRadius: 14,
                     border: "none",
-                    background: disabled
-                      ? "#d9d9d9"
-                      : "linear-gradient(90deg, #25d366, #ffcc00)",
+                    background: disabled ? "#d9d9d9" : "linear-gradient(90deg, #25d366, #ffcc00)",
                     color: "#111",
                     fontWeight: 950,
                     cursor: disabled ? "not-allowed" : "pointer",
