@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 
 type Me = {
@@ -46,34 +46,230 @@ function extractYouTubeVideoId(url: string): string | null {
   }
 }
 
-function buildYouTubeEmbed(url: string, startSec?: number | null, endSec?: number | null): string | null {
-  const videoId = extractYouTubeVideoId(url);
-  if (!videoId) return null;
-
-  const params = new URLSearchParams({
-    rel: "0",
-    modestbranding: "1",
-    playsinline: "1",
-  });
-
-  if (typeof startSec === "number" && Number.isFinite(startSec) && startSec >= 0) {
-    params.set("start", String(Math.floor(startSec)));
-  }
-  if (typeof endSec === "number" && Number.isFinite(endSec) && endSec >= 0) {
-    params.set("end", String(Math.floor(endSec)));
-  }
-
-  if (params.has("start") && params.has("end")) {
-    const s = Number(params.get("start"));
-    const e = Number(params.get("end"));
-    if (!(e > s)) params.delete("end");
-  }
-
-  return `https://www.youtube.com/embed/${videoId}?${params.toString()}`;
-}
-
 function isDirectVideo(url: string) {
   return /\.(mp4|webm|ogg)(\?.*)?$/i.test(url);
+}
+
+/** ---------- YouTube IFrame API loader ---------- */
+declare global {
+  interface Window {
+    YT?: any;
+    onYouTubeIframeAPIReady?: () => void;
+  }
+}
+
+function loadYouTubeIframeAPI(): Promise<void> {
+  return new Promise((resolve) => {
+    if (window.YT && window.YT.Player) return resolve();
+
+    // evita doppio script
+    const existing = document.querySelector('script[data-yt-iframe-api="1"]') as HTMLScriptElement | null;
+    if (existing) {
+      const prev = window.onYouTubeIframeAPIReady;
+      window.onYouTubeIframeAPIReady = () => {
+        prev?.();
+        resolve();
+      };
+      return;
+    }
+
+    const tag = document.createElement("script");
+    tag.src = "https://www.youtube.com/iframe_api";
+    tag.async = true;
+    tag.dataset.ytIframeApi = "1";
+
+    const prev = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+      prev?.();
+      resolve();
+    };
+
+    document.head.appendChild(tag);
+  });
+}
+
+/**
+ * ClipYouTube controllato:
+ * - usa YT.Player (enablejsapi)
+ * - NO containerId: usa ref DOM per evitare collisioni tra player
+ * - bottone "Ricarica" => seekTo(start) + play
+ * - quando arriva a end: torna a start e pausa (NO reset durante la visione, NO loop automatico)
+ */
+function ClipYouTube({
+  url,
+  startSec,
+  endSec,
+  height = 240,
+  onApi,
+}: {
+  url: string;
+  startSec: number | null;
+  endSec: number | null;
+  height?: number;
+  onApi?: (api: { replayFromStart: () => void }) => void;
+}) {
+  const videoId = useMemo(() => (url ? extractYouTubeVideoId(url) : null), [url]);
+
+  // ✅ QUI: ref al container DOM (niente id)
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  const playerRef = useRef<any>(null);
+  const intervalRef = useRef<number | null>(null);
+
+  const safeStart =
+    typeof startSec === "number" && Number.isFinite(startSec) && startSec >= 0 ? Math.floor(startSec) : null;
+
+  const safeEnd =
+    typeof endSec === "number" && Number.isFinite(endSec) && endSec >= 0 ? Math.floor(endSec) : null;
+
+  const hasClip =
+    typeof safeStart === "number" &&
+    typeof safeEnd === "number" &&
+    Number.isFinite(safeStart) &&
+    Number.isFinite(safeEnd) &&
+    safeEnd > safeStart;
+
+  const replayFromStart = useCallback(() => {
+    const p = playerRef.current;
+    if (!p) return;
+
+    if (typeof safeStart === "number") {
+      p.seekTo(safeStart, true);
+    }
+    p.playVideo?.();
+  }, [safeStart]);
+
+  // crea/distrugge il player quando cambia videoId
+  useEffect(() => {
+    if (!videoId) return;
+    if (!containerRef.current) return;
+
+    let cancelled = false;
+
+    (async () => {
+      await loadYouTubeIframeAPI();
+      if (cancelled) return;
+      if (!containerRef.current) return;
+
+      // se esiste già, distruggi
+      if (playerRef.current?.destroy) {
+        playerRef.current.destroy();
+        playerRef.current = null;
+      }
+
+      // ✅ QUI: passiamo l'elemento DOM, non una stringa id
+      playerRef.current = new window.YT.Player(containerRef.current, {
+        height,
+        width: "100%",
+        videoId,
+        playerVars: {
+          rel: 0,
+          modestbranding: 1,
+          playsinline: 1,
+          enablejsapi: 1,
+          autoplay: 0,
+          ...(typeof safeStart === "number" ? { start: safeStart } : {}),
+          ...(hasClip ? { end: safeEnd as number } : {}),
+        },
+        events: {
+          onReady: () => {
+            const p = playerRef.current;
+            if (!p) return;
+                    
+            try {
+              // Carica il video SENZA farlo partire (cue = prepara, non autoplay)
+              if (typeof safeStart === "number") {
+                p.cueVideoById({
+                  videoId,
+                  startSeconds: safeStart,
+                  ...(hasClip && typeof safeEnd === "number" ? { endSeconds: safeEnd } : {}),
+                });
+              } else {
+                p.cueVideoById({ videoId });
+              }
+            
+              // Doppia sicurezza: resta fermo
+              p.pauseVideo?.();
+            
+              // (opzionale ma utile) Riporta esattamente allo start, senza play
+              if (typeof safeStart === "number") {
+                p.seekTo(safeStart, true);
+                p.pauseVideo?.();
+              }
+            } catch {
+              // se l'API non è pronta o l'operazione fallisce, non facciamo crashare nulla
+            }
+          
+            // Espone l'API al parent (per il bottone "Ricarica")
+            onApi?.({ replayFromStart });
+          },
+          onStateChange: (e: any) => {
+            const state = e?.data;
+
+            // 1 = PLAYING, 2 = PAUSED, 0 = ENDED
+            if (state === 1) {
+              if (hasClip) {
+                if (intervalRef.current) window.clearInterval(intervalRef.current);
+                intervalRef.current = window.setInterval(() => {
+                  const p = playerRef.current;
+                  if (!p) return;
+                  const t = Number(p.getCurrentTime?.() ?? 0);
+
+                  if (typeof safeEnd === "number" && t >= safeEnd) {
+                    try {
+                      p.pauseVideo?.();
+                      if (typeof safeStart === "number") p.seekTo(safeStart, true);
+                    } catch {}
+                  }
+                }, 250);
+              }
+            } else if (state === 2 || state === 0) {
+              if (intervalRef.current) {
+                window.clearInterval(intervalRef.current);
+                intervalRef.current = null;
+              }
+
+              if (state === 0 && typeof safeStart === "number") {
+                try {
+                  playerRef.current.seekTo(safeStart, true);
+                  playerRef.current.pauseVideo?.();
+                } catch {}
+              }
+            }
+          },
+        },
+      });
+    })();
+
+    return () => {
+      cancelled = true;
+      if (intervalRef.current) {
+        window.clearInterval(intervalRef.current);
+        intervalRef.current = null;
+      }
+      if (playerRef.current?.destroy) {
+        playerRef.current.destroy();
+        playerRef.current = null;
+      }
+    };
+  }, [videoId, height, safeStart, safeEnd, hasClip, onApi, replayFromStart]);
+
+  if (!videoId) return null;
+
+  return (
+    <div
+      style={{
+        width: "100%",
+        height,
+        borderRadius: 14,
+        overflow: "hidden",
+        background: "#000",
+      }}
+    >
+      {/* ✅ div “vuoto” che diventa iframe */}
+      <div ref={containerRef} />
+    </div>
+  );
 }
 
 function IconReplay({ size = 18 }: { size?: number }) {
@@ -84,69 +280,6 @@ function IconReplay({ size = 18 }: { size?: number }) {
       <path d="M7 17H5v-2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M17 7h2v2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
-  );
-}
-
-/**
- * ClipYouTube:
- * - iframe con start/end
- * - se start/end validi: dopo la durata della clip -> onAutoReload (rimonta dal parent)
- * - reloadKey controlla la key dell'iframe (rimonta e riparte sempre da start)
- */
-function ClipYouTube({
-  url,
-  startSec,
-  endSec,
-  height = 240,
-  reloadKey,
-  onAutoReload,
-}: {
-  url: string;
-  startSec: number | null;
-  endSec: number | null;
-  height?: number;
-  reloadKey: number;
-  onAutoReload?: () => void;
-}) {
-  const timerRef = useRef<number | null>(null);
-
-  const embed = useMemo(() => buildYouTubeEmbed(url, startSec, endSec), [url, startSec, endSec]);
-
-  useEffect(() => {
-    if (timerRef.current) window.clearTimeout(timerRef.current);
-    timerRef.current = null;
-
-    if (typeof startSec === "number" && typeof endSec === "number" && endSec > startSec && embed) {
-      const durationMs = (endSec - startSec) * 1000;
-      const safetyMs = 400;
-
-      timerRef.current = window.setTimeout(() => {
-        onAutoReload?.();
-      }, durationMs + safetyMs);
-    }
-
-    return () => {
-      if (timerRef.current) window.clearTimeout(timerRef.current);
-      timerRef.current = null;
-    };
-  }, [embed, startSec, endSec, onAutoReload]);
-
-  if (!embed) return null;
-
-  return (
-    <iframe
-      key={reloadKey}
-      src={embed}
-      style={{
-        width: "100%",
-        height,
-        borderRadius: 14,
-        border: 0,
-        background: "#000",
-      }}
-      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-      allowFullScreen
-    />
   );
 }
 
@@ -168,7 +301,8 @@ function OptionCard({
 
   const isYoutube = !!(o.media_url && extractYouTubeVideoId(o.media_url));
 
-  const [clipKey, setClipKey] = useState(0);
+  // API del player per il tasto Ricarica (niente rimontaggi)
+  const playerApiRef = useRef<{ replayFromStart: () => void } | null>(null);
 
   return (
     <div
@@ -218,33 +352,19 @@ function OptionCard({
           </div>
         </div>
 
-        {/* Bottone ricarica in alto a destra */}
-        {isYoutube && (
-          <button
-            type="button"
-            onClick={() => setClipKey((k) => k + 1)}
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              gap: 8,
-              padding: "8px 10px",
-              borderRadius: 12,
-              border: "1px solid rgba(0,0,0,0.12)",
-              background: "rgba(0,0,0,0.06)",
-              color: "#111",
-              fontWeight: 950,
-              cursor: "pointer",
-              flexShrink: 0,
-              height: 38,
-              whiteSpace: "nowrap",
-            }}
-            title="Ricarica la clip (riparte dallo start)"
-            aria-label="Ricarica la clip"
-          >
-            <IconReplay />
-            Ricarica
-          </button>
-        )}
+        {/*
+          Bottone ricarica in alto a destra (commentato)
+          {isYoutube && (
+            <button
+              type="button"
+              onClick={() => playerApiRef.current?.replayFromStart()}
+              ...
+            >
+              <IconReplay />
+              Ricarica
+            </button>
+          )}
+        */}
       </div>
 
       {/* Media */}
@@ -256,8 +376,9 @@ function OptionCard({
               startSec={o.start_sec}
               endSec={o.end_sec}
               height={240}
-              reloadKey={clipKey}
-              onAutoReload={() => setClipKey((k) => k + 1)}
+              onApi={(api) => {
+                playerApiRef.current = api;
+              }}
             />
           ) : isDirectVideo(o.media_url) ? (
             <video src={o.media_url} controls style={{ width: "100%", borderRadius: 14 }} />
@@ -343,11 +464,7 @@ function ConfirmModal({
       >
         <div style={{ fontSize: 18, fontWeight: 950 }}>{title}</div>
 
-        {description && (
-          <div style={{ marginTop: 8, color: "#333", lineHeight: 1.35 }}>
-            {description}
-          </div>
-        )}
+        {description && <div style={{ marginTop: 8, color: "#333", lineHeight: 1.35 }}>{description}</div>}
 
         <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
           <button
@@ -477,6 +594,7 @@ export default function VotePage() {
               fontSize: 12,
               color: "#111",
               boxShadow: "0 8px 18px rgba(0,0,0,0.14)",
+              cursor: "pointer",
             }}
           >
             {me.team ?? "SQUADRA"}
@@ -487,7 +605,6 @@ export default function VotePage() {
           </div>
 
           <div style={{ fontSize: 13, color: "#333", opacity: 0.9, marginTop: 2 }}>{me.email}</div>
-          {}
         </div>
       </div>
     );
